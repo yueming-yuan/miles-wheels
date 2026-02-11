@@ -23,4 +23,7 @@ git clone https://github.com/radixark/miles.git /tmp/miles && \
   cd /tmp/miles/miles/backends/megatron_utils/kernels/int4_qat && \
   pip wheel . --no-build-isolation --no-deps -w /tmp/wheels/
 
+# 5. transformer_engine
+pip wheel "transformer_engine[pytorch]==2.10.0" --no-build-isolation --no-deps -w /tmp/wheels/
+
 ls -lh /tmp/wheels/
