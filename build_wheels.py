@@ -40,9 +40,10 @@ def _setup_env(cuda: str, arch: Arch):
     print(f"Arch  : {arch.value}")
     os.environ.setdefault(
         "TORCH_CUDA_ARCH_LIST",
-        "8.0;8.6;8.9;9.0" if arch == Arch.x86 else "9.0",
+        "8.0;8.6;8.9;9.0;10.0;10.3" if arch == Arch.x86 else "9.0;10.0;10.3",
     )
     os.environ["CUDA_VERSION"] = f"{cuda_major}.{cuda_minor}"
+    print(f"TORCH_CUDA_ARCH_LIST: {os.environ['TORCH_CUDA_ARCH_LIST']}")
 
 
 # ── build steps ──────────────────────────────────────────────
