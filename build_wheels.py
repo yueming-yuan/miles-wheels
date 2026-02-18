@@ -1,32 +1,53 @@
 #!/usr/bin/env python3
 """Build GPU wheels (flash-attn, apex, transformer_engine, etc.)."""
 
-import argparse
+import glob
 import os
 import shutil
 import subprocess
 import sys
+from enum import Enum
+from typing import Annotated, Optional
 
+import typer
 
 WHEEL_DIR = "/tmp/wheels"
+REPO = "yueming-yuan/miles-wheels"
+
+app = typer.Typer(help="Build and upload GPU wheels.")
 
 
-def run(cmd, *, env=None, cwd=None, shell=False):
+class Arch(str, Enum):
+    x86 = "x86"
+    aarch64 = "aarch64"
+
+
+def run(cmd, *, env=None, cwd=None):
     """Run a command, streaming output. Exit on failure."""
     merged_env = {**os.environ, **(env or {})}
     print(f"\n{'='*60}")
-    print(f"Running: {cmd if isinstance(cmd, str) else ' '.join(cmd)}")
+    print(f"Running: {' '.join(cmd)}")
     print(f"{'='*60}\n")
-    result = subprocess.run(
-        cmd, env=merged_env, cwd=cwd, shell=shell,
-    )
+    result = subprocess.run(cmd, env=merged_env, cwd=cwd)
     if result.returncode != 0:
         print(f"FAILED (exit code {result.returncode}): {cmd}")
-        sys.exit(result.returncode)
+        raise typer.Exit(result.returncode)
 
 
-def build_flash_attn(args):
-    """1. flash-attn"""
+def _setup_env(cuda: str, arch: Arch):
+    cuda_major, cuda_minor = cuda[:2], cuda[2:]
+    print(f"CUDA  : {cuda_major}.{cuda_minor}  (cu{cuda})")
+    print(f"Arch  : {arch.value}")
+    os.environ.setdefault(
+        "TORCH_CUDA_ARCH_LIST",
+        "8.0;8.6;8.9;9.0" if arch == Arch.x86 else "9.0",
+    )
+    os.environ["CUDA_VERSION"] = f"{cuda_major}.{cuda_minor}"
+
+
+# ── build steps ──────────────────────────────────────────────
+
+def _build_flash_attn(cuda: str):
     run(
         [sys.executable, "-m", "pip", "wheel",
          "flash-attn==2.7.4.post1",
@@ -36,8 +57,7 @@ def build_flash_attn(args):
     )
 
 
-def build_flash_attn_hopper(args):
-    """2. flash-attn hopper (build from source)"""
+def _build_flash_attn_hopper(cuda: str):
     repo_dir = "/tmp/flash-attention"
     if os.path.exists(repo_dir):
         shutil.rmtree(repo_dir)
@@ -51,7 +71,6 @@ def build_flash_attn_hopper(args):
         env={"MAX_JOBS": "96"},
     )
 
-    # copy wheels
     hopper_dist = os.path.join(repo_dir, "hopper", "dist")
     for f in os.listdir(hopper_dist):
         if f.endswith(".whl"):
@@ -60,8 +79,7 @@ def build_flash_attn_hopper(args):
     shutil.rmtree(repo_dir)
 
 
-def build_apex(args):
-    """3. apex"""
+def _build_apex(cuda: str):
     run(
         [sys.executable, "-m", "pip", "wheel",
          "-v", "--no-build-isolation", "--no-deps",
@@ -72,8 +90,7 @@ def build_apex(args):
     )
 
 
-def build_int4_qat(args):
-    """4. int4_qat (needs miles source)"""
+def _build_int4_qat(cuda: str):
     miles_dir = "/tmp/miles"
     if os.path.exists(miles_dir):
         shutil.rmtree(miles_dir)
@@ -87,9 +104,8 @@ def build_int4_qat(args):
     )
 
 
-def build_transformer_engine(args):
-    """5. transformer_engine"""
-    cuda_major = args.cuda[:2]
+def _build_transformer_engine(cuda: str):
+    cuda_major = cuda[:2]
     extras = "core_cu13,pytorch" if cuda_major >= "13" else "pytorch"
     run(
         [sys.executable, "-m", "pip", "wheel",
@@ -99,49 +115,83 @@ def build_transformer_engine(args):
     )
 
 
-STEPS = [
-    ("flash-attn", build_flash_attn),
-    ("flash-attn-hopper", build_flash_attn_hopper),
-    ("apex", build_apex),
-    ("int4_qat", build_int4_qat),
-]
+STEPS = {
+    "flash-attn": _build_flash_attn,
+    "flash-attn-hopper": _build_flash_attn_hopper,
+    "apex": _build_apex,
+    "int4_qat": _build_int4_qat,
+    "te": _build_transformer_engine,
+}
+
+STEP_NAMES = ", ".join(STEPS)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Build GPU wheels")
-    parser.add_argument("--cuda", default="129",
-                        help="CUDA version")
-    parser.add_argument("--arch", default="x86",
-                        help="Architecture: x86 or aarch64 (default: x86)")
-    parser.add_argument("--only", nargs="*", metavar="STEP",
-                        help=f"Only run these steps: {', '.join(n for n, _ in STEPS)}")
-    args = parser.parse_args()
+# ── commands ─────────────────────────────────────────────────
 
-    assert args.cuda in ["129", "130"], "currently only cu129 and cu130 are supported"
-
-    cuda_major = args.cuda[:2]   # e.g. "12"
-    cuda_minor = args.cuda[2:]   # e.g. "9"
-    print(f"CUDA  : {cuda_major}.{cuda_minor}  (cu{args.cuda})")
-    print(f"Arch  : {args.arch}")
-
-    # Set CUDA-related env vars
-    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.6;8.9;9.0"
-                          if args.arch == "x86" else "9.0")
-    os.environ["CUDA_VERSION"] = f"{cuda_major}.{cuda_minor}"
-
+@app.command()
+def build(
+    cuda: Annotated[str, typer.Option(help="CUDA version, e.g. 129, 130")] = "129",
+    arch: Annotated[Arch, typer.Option(help="Architecture")] = Arch.x86,
+    only: Annotated[Optional[list[str]], typer.Option(
+        help=f"Only run specific steps ({STEP_NAMES})",
+    )] = None,
+):
+    """Build all GPU wheels into /tmp/wheels."""
+    assert cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
+    _setup_env(cuda, arch)
     os.makedirs(WHEEL_DIR, exist_ok=True)
 
-    selected = {s.lower() for s in (args.only or [])}
-    for name, fn in STEPS:
+    selected = {s.lower() for s in (only or [])}
+    for name, fn in STEPS.items():
         if selected and name not in selected:
             print(f"\nSkipping {name}")
             continue
         print(f"\n>>> Building {name} ...")
-        fn(args)
+        fn(cuda)
 
     print(f"\nDone. Wheels in {WHEEL_DIR}:")
     run(["ls", "-lh", WHEEL_DIR])
 
 
+@app.command()
+def upload(
+    cuda: Annotated[str, typer.Option(help="CUDA version, e.g. 129, 130")] = "129",
+    arch: Annotated[Arch, typer.Option(help="Architecture")] = Arch.x86,
+):
+    """Upload all wheels in /tmp/wheels as a GitHub release."""
+    assert cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
+
+    cuda_major, cuda_minor = cuda[:2], cuda[2:]
+    arch_str = "x86_64" if arch == Arch.x86 else arch.value
+    tag = f"cu{cuda}-{arch_str}"
+    title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str}"
+
+    wheels = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.whl")))
+    if not wheels:
+        print(f"No .whl files found in {WHEEL_DIR}")
+        raise typer.Exit(1)
+
+    names = [os.path.splitext(os.path.basename(w))[0].split("-")[0] for w in wheels]
+    body = "Pre-built wheels: " + ", ".join(names)
+
+    print(f"\nUploading {len(wheels)} wheels as release '{tag}'")
+    for w in wheels:
+        print(f"  {os.path.basename(w)}")
+
+    # Delete existing release with same tag (if any)
+    subprocess.run(
+        ["gh", "release", "delete", tag, "--repo", REPO, "--yes", "--cleanup-tag"],
+        capture_output=True,
+    )
+
+    run(["gh", "release", "create", tag,
+         "--repo", REPO,
+         "--title", title,
+         "--notes", body,
+         *wheels])
+
+    print(f"\nRelease created: https://github.com/{REPO}/releases/tag/{tag}")
+
+
 if __name__ == "__main__":
-    main()
+    app()
