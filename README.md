@@ -11,3 +11,8 @@ python build_wheels.py upload --cuda 129 --arch x86
 python build_wheels.py build --cuda 130 --arch aarch64
 python build_wheels.py upload --cuda 130 --arch aarch64
 ```
+
+### test wheels
+```shell
+python test_wheels.py install-and-test /tmp/wheels
+```
