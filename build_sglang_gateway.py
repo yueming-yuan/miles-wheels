@@ -117,16 +117,34 @@ def _checkout_git_ref(repo: str, ref: str, dest: str):
 
 
 def _patch_sources(gw_dir: str):
-    """Apply compilation-compatibility patches to sgl-model-gateway sources."""
-    # WasmModuleManager::new returns Result in smg-wasm <1.0.1; the format!
-    # error conversion doesn't compile — use .to_string() instead.
+    """Apply source patches to fix Rust compilation errors in sgl-model-gateway.
+
+    These patches work around type mismatches between sgl-model-gateway and its
+    dependency smg-wasm (<1.0.1). The gateway code assumes interfaces that were
+    changed in smg-wasm, causing compilation failures. We patch the gateway side
+    rather than pinning smg-wasm because we don't want to fork or modify the
+    upstream sglang repo — just build it as-is with minimal fixups.
+
+    If upstream fixes these issues, _patch_file will log a warning ("pattern not
+    found — already fixed upstream?") and continue without error.
+    """
+    # Patch 1: app_context.rs — error type mismatch in WasmModuleManager init.
+    #
+    # WasmModuleManager::new() returns Result<_, E> where E is not String.
+    # The gateway code uses `format!(...)` in map_err, which produces a String,
+    # but the compiler expects E (or something convertible via From<String>).
+    # Fix: use .to_string() which satisfies the Display-based conversion.
     _patch_file(
         os.path.join(gw_dir, "src", "app_context.rs"),
         r'\.map_err\(\|e\| format!\("Failed to initialize WASM module manager: \{\}", e\)\)',
         '.map_err(|e| e.to_string())',
         flags=re.DOTALL,
     )
-    # wasm_bytes field shorthand needs .into() for type conversion
+    # Patch 2: wasm_module_registration.rs — field type mismatch for wasm_bytes.
+    #
+    # The struct field expects a different type (e.g. Bytes) than the local
+    # variable (e.g. Vec<u8>). Rust's field shorthand `wasm_bytes,` only works
+    # when types match exactly. Fix: use explicit `.into()` conversion.
     _patch_file(
         os.path.join(gw_dir, "src", "core", "steps", "wasm_module_registration.rs"),
         r'^(\s*)wasm_bytes,$',
