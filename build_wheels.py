@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 
+import build_sglang_gateway
+
 WHEEL_DIR = "/tmp/wheels"
 REPO = "yueming-yuan/miles-wheels"
 
@@ -106,12 +108,23 @@ def _build_transformer_engine(args):
     )
 
 
+def _build_sgl_model_gateway(args):
+    """Build sgl-model-gateway Python wheel and standalone binary from source."""
+    cfg = build_sglang_gateway.BuildConfig(
+        repo=args.sglang_repo,
+        ref=args.sglang_ref,
+        bootstrap_rust=args.bootstrap_rust,
+    )
+    build_sglang_gateway.build(cfg, WHEEL_DIR)
+
+
 STEPS = {
     "flash-attn": _build_flash_attn,
     "flash-attn-hopper": _build_flash_attn_hopper,
     "apex": _build_apex,
     "int4_qat": _build_int4_qat,
     "te": _build_transformer_engine,
+    "sgl-model-gateway": _build_sgl_model_gateway,
 }
 
 STEP_NAMES = ", ".join(STEPS)
@@ -147,16 +160,18 @@ def cmd_upload(args):
     title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str}"
 
     wheels = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.whl")))
-    if not wheels:
-        print(f"No .whl files found in {WHEEL_DIR}")
+    tarballs = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.tar.gz")))
+    assets = wheels + tarballs
+    if not assets:
+        print(f"No .whl or .tar.gz files found in {WHEEL_DIR}")
         sys.exit(1)
 
     names = [os.path.splitext(os.path.basename(w))[0].split("-")[0] for w in wheels]
     body = "Pre-built wheels: " + ", ".join(names)
 
-    print(f"\nUploading {len(wheels)} wheels as release '{tag}'")
-    for w in wheels:
-        print(f"  {os.path.basename(w)}")
+    print(f"\nUploading {len(assets)} assets as release '{tag}'")
+    for a in assets:
+        print(f"  {os.path.basename(a)}")
 
     # Delete existing release with same tag (if any)
     subprocess.run(
@@ -168,7 +183,7 @@ def cmd_upload(args):
          "--repo", REPO,
          "--title", title,
          "--notes", body,
-         *wheels])
+         *assets])
 
     print(f"\nRelease created: https://github.com/{REPO}/releases/tag/{tag}")
 
@@ -182,7 +197,13 @@ def main():
     p_build.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_build.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_build.add_argument("--only", nargs="+", help=f"Only run specific steps ({STEP_NAMES})")
-    p_build.set_defaults(func=cmd_build)
+    p_build.add_argument("--sglang-repo", default=build_sglang_gateway.SGLANG_REPO_DEFAULT,
+                         help="sglang git repository for sgl-model-gateway")
+    p_build.add_argument("--sglang-ref", default=build_sglang_gateway.SGLANG_REF_DEFAULT,
+                         help="sglang git ref (branch/tag/commit)")
+    p_build.add_argument("--no-bootstrap-rust", dest="bootstrap_rust", action="store_false",
+                         help="Don't auto-install Rust toolchain")
+    p_build.set_defaults(func=cmd_build, bootstrap_rust=True)
 
     # ── upload ───────────────────────────────────────────────
     p_upload = sub.add_parser("upload", help="Upload all wheels as a GitHub release")
