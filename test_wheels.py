@@ -11,7 +11,7 @@ import typer
 
 app = typer.Typer(help="Install and test GPU wheels.")
 
-STEP_NAMES = "flash-attn, flash-attn-hopper, apex, int4_qat, te"
+STEP_NAMES = "flash-attn, flash-attn-hopper, apex, int4_qat, te, sgl-model-gateway"
 
 
 def run(cmd, *, env=None):
@@ -76,12 +76,32 @@ def _install_te(wheel_dir: str):
         run([sys.executable, "-m", "pip", "install", whl])
 
 
+def _install_sgl_model_gateway(wheel_dir: str):
+    # Install the Python wheel (package name: sglang-router, wheel: sglang_router-*.whl)
+    whl = _find_wheel(wheel_dir, "sglang_router-*.whl")
+    run([sys.executable, "-m", "pip", "install", "--force-reinstall", whl])
+
+    # Extract and install the binary from tarball
+    import platform
+    import tarfile
+
+    machine = platform.machine()
+    tarball = os.path.join(wheel_dir, f"sgl-model-gateway-linux-{machine}.tar.gz")
+    if not os.path.exists(tarball):
+        raise FileNotFoundError(f"Binary tarball not found: {tarball}")
+    with tarfile.open(tarball, "r:gz") as tar:
+        tar.extract("sgl-model-gateway", path="/usr/local/bin", filter="data")
+    os.chmod("/usr/local/bin/sgl-model-gateway", 0o755)
+    print("Installed sgl-model-gateway binary to /usr/local/bin/")
+
+
 INSTALL_STEPS = {
     "flash-attn": _install_flash_attn,
     "flash-attn-hopper": _install_flash_attn_hopper,
     "apex": _install_apex,
     "int4_qat": _install_int4_qat,
     "te": _install_te,
+    "sgl-model-gateway": _install_sgl_model_gateway,
 }
 
 
@@ -130,11 +150,21 @@ def _test_te():
     print("transformer_engine import: OK")
 
 
+def _test_sgl_model_gateway():
+    import sglang_router  # noqa: F401
+    print("sglang_router import: OK")
+    import subprocess as _sp
+    result = _sp.run(["sgl-model-gateway", "--help"], capture_output=True)
+    assert result.returncode == 0, "sgl-model-gateway binary --help failed"
+    print("sgl-model-gateway binary: OK")
+
+
 TEST_STEPS = {
     "flash-attn": _test_flash_attn,
     "flash-attn-hopper": _test_flash_attn_hopper,
     "apex": _test_apex,
     "int4_qat": _test_int4_qat,
+    "sgl-model-gateway": _test_sgl_model_gateway,
 }
 
 
