@@ -96,8 +96,8 @@ def _build_int4_qat(args):
 
 
 def _build_transformer_engine(args):
-    cuda_major = args.cuda[:2]
-    extras = "core_cu13,pytorch" if cuda_major >= "13" else "pytorch"
+    cuda_major = int(args.cuda[:2])
+    extras = "core_cu13,pytorch" if cuda_major >= 13 else "pytorch"
     run(
         [sys.executable, "-m", "pip", "wheel",
          f"transformer_engine[{extras}]==2.10.0",
