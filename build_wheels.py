@@ -108,13 +108,9 @@ def _build_transformer_engine(args):
     )
 
 
-def _build_sgl_model_gateway(args):
-    """Build sgl-model-gateway Python wheel and standalone binary from source."""
-    cfg = build_sglang_gateway.BuildConfig(
-        repo=args.sglang_repo,
-        ref=args.sglang_ref,
-        bootstrap_rust=args.bootstrap_rust,
-    )
+def _build_sgl_router(args):
+    """Build sgl-router Python wheel and standalone binary from source."""
+    cfg = build_sglang_gateway.BuildConfig(bootstrap_rust=args.bootstrap_rust)
     build_sglang_gateway.build(cfg, WHEEL_DIR)
 
 
@@ -124,7 +120,7 @@ STEPS = {
     "apex": _build_apex,
     "int4_qat": _build_int4_qat,
     "te": _build_transformer_engine,
-    "sgl-model-gateway": _build_sgl_model_gateway,
+    "sgl-router": _build_sgl_router,
 }
 
 STEP_NAMES = ", ".join(STEPS)
@@ -197,10 +193,6 @@ def main():
     p_build.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_build.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_build.add_argument("--only", nargs="+", help=f"Only run specific steps ({STEP_NAMES})")
-    p_build.add_argument("--sglang-repo", default=build_sglang_gateway.SGLANG_REPO_DEFAULT,
-                         help="sglang git repository for sgl-model-gateway")
-    p_build.add_argument("--sglang-ref", default=build_sglang_gateway.SGLANG_REF_DEFAULT,
-                         help="sglang git ref (branch/tag/commit)")
     p_build.add_argument("--no-bootstrap-rust", dest="bootstrap_rust", action="store_false",
                          help="Don't auto-install Rust toolchain")
     p_build.set_defaults(func=cmd_build, bootstrap_rust=True)
