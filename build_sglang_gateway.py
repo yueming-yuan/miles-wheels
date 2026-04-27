@@ -7,7 +7,7 @@ for debugging.
 
 Usage (standalone):
     python build_sglang_gateway.py --out /tmp/wheels
-    python build_sglang_gateway.py --repo git@github.com:radixark/sgl-router-for-miles.git --ref main
+    python build_sglang_gateway.py --repo https://github.com/radixark/sgl-router-for-miles.git --ref main
 """
 
 import os
@@ -19,7 +19,7 @@ import sys
 import tarfile
 from dataclasses import dataclass
 
-ROUTER_REPO_DEFAULT = "git@github.com:radixark/sgl-router-for-miles.git"
+ROUTER_REPO_DEFAULT = "https://github.com/radixark/sgl-router-for-miles.git"
 ROUTER_REF_DEFAULT = "main"
 
 
