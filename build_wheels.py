@@ -99,13 +99,27 @@ def _build_int4_qat(args):
 
 def _build_transformer_engine(args):
     cuda_major = int(args.cuda[:2])
-    extras = "core_cu13,pytorch" if cuda_major >= 13 else "pytorch"
+    if cuda_major >= 13:
+        extras = "core_cu13,pytorch"
+        version = "2.12.0"
+        run([sys.executable, "-m", "pip", "install", "nvidia-mathdx==25.6.0"])
+        run([sys.executable, "-m", "pip", "install", f"transformer_engine_cu13=={version}"])
+    else:
+        extras = "pytorch"
+        version = "2.10.0"
     run(
         [sys.executable, "-m", "pip", "wheel",
-         f"transformer_engine[{extras}]==2.10.0",
+         f"transformer_engine[{extras}]=={version}",
          "-v", "--no-build-isolation", "--no-deps",
          "-w", WHEEL_DIR],
     )
+    if cuda_major >= 13:
+        run(
+            [sys.executable, "-m", "pip", "wheel",
+             f"transformer_engine_torch=={version}",
+             "-v", "--no-build-isolation", "--no-deps",
+             "-w", WHEEL_DIR],
+        )
 
 
 def _build_sgl_router(args):
