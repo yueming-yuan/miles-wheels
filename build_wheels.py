@@ -166,8 +166,8 @@ def cmd_upload(args):
 
     cuda_major, cuda_minor = args.cuda[:2], args.cuda[2:]
     arch_str = "x86_64" if args.arch == "x86" else args.arch
-    tag = f"cu{args.cuda}-{arch_str}"
-    title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str}"
+    tag = f"cu{args.cuda}-{arch_str}-v{args.version}"
+    title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str} (v{args.version})"
 
     wheels = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.whl")))
     tarballs = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.tar.gz")))
@@ -215,6 +215,8 @@ def main():
     p_upload = sub.add_parser("upload", help="Upload all wheels as a GitHub release")
     p_upload.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_upload.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
+    p_upload.add_argument("--version", required=True,
+                          help="Wheels release version X.Y.Z; tag becomes cu<cuda>-<arch>-vX.Y.Z")
     p_upload.set_defaults(func=cmd_upload)
 
     args = parser.parse_args()
