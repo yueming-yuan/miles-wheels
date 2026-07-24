@@ -164,6 +164,83 @@ def _build_sgl_router(args):
     build_sglang_gateway.build(cfg, WHEEL_DIR)
 
 
+# Pinned past v0.3.12: the structured object store API miles' mooncake
+# object-store backend imports (FieldSchema, export_ref/import_ref, unified
+# put/get, release_result; kvcache-ai/Mooncake#2907/#3013/#3023) missed the
+# v0.3.12 release cut. Drop this step for a plain pip pin once a release
+# ships the API.
+MOONCAKE_COMMIT = "4dbe5a4c194669850e9abad61172e9878b245b15"
+MOONCAKE_VERSION = "0.3.13.dev0+g4dbe5a4c"
+
+
+def _build_mooncake(args):
+    """Build the mooncake wheel from source, mirroring upstream release-cuda13.yaml."""
+    cuda_major = int(args.cuda[:2])
+    repo_dir = "/tmp/mooncake"
+    if os.path.exists(repo_dir):
+        shutil.rmtree(repo_dir)
+
+    run(["git", "clone", "https://github.com/kvcache-ai/Mooncake.git", repo_dir])
+    run(["git", "checkout", MOONCAKE_COMMIT], cwd=repo_dir)
+    run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
+    run(["bash", "dependencies.sh", "-y"], cwd=repo_dir)
+
+    # The wheel version comes from pyproject.toml, not the VERSION env
+    # (upstream bumps it on release branches); stamp the pinned commit in.
+    run(["sed", "-i", "-E", f's/^version = ".*"$/version = "{MOONCAKE_VERSION}"/',
+         "mooncake-wheel/pyproject.toml"], cwd=repo_dir)
+    run(["grep", "-q", f'version = "{MOONCAKE_VERSION}"',
+         "mooncake-wheel/pyproject.toml"], cwd=repo_dir)
+
+    torch_version = subprocess.check_output(
+        [sys.executable, "-c", "import torch; print(torch.__version__.split('+')[0])"],
+        text=True,
+    ).strip()
+
+    build_env = {
+        "BUILD_WITH_EP": "1",
+        "CUDA_HOME": "/usr/local/cuda",
+        # Bound the nested Ninja build used by torch.utils.cpp_extension.
+        "MAX_JOBS": "2",
+        "LIBRARY_PATH": "/usr/local/cuda/lib64/stubs:" + os.environ.get("LIBRARY_PATH", ""),
+        "PATH": os.environ["PATH"] + ":/usr/local/go/bin",
+    }
+    build_dir = os.path.join(repo_dir, "build")
+    os.makedirs(build_dir)
+    run(
+        ["cmake", "..",
+         "-DBUILD_UNIT_TESTS=OFF", "-DUSE_HTTP=ON", "-DUSE_ETCD=ON", "-DUSE_CUDA=ON",
+         "-DWITH_EP=ON", "-DSTORE_USE_ETCD=ON", "-DCMAKE_BUILD_TYPE=Release",
+         # EP only for this image's torch; extend when the image ships more.
+         f"-DEP_TORCH_VERSIONS={torch_version}",
+         f"-DPython3_EXECUTABLE={sys.executable}"],
+        cwd=build_dir, env=build_env,
+    )
+    run(["cmake", "--build", ".", f"-j{os.cpu_count()}"], cwd=build_dir, env=build_env)
+    run(["cmake", "--install", "."], cwd=build_dir, env=build_env)
+
+    if args.arch == "x86":
+        allocator_out = os.path.join(build_dir, "mooncake-transfer-engine/nvlink-allocator/")
+        os.makedirs(allocator_out, exist_ok=True)
+        run(["bash", "build.sh", allocator_out],
+            cwd=os.path.join(repo_dir, "mooncake-transfer-engine/nvlink-allocator"),
+            env=build_env)
+
+    pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    wheel_env = {
+        **build_env,
+        "PYTHON_VERSION": pyver,
+        "OUTPUT_DIR": "dist",
+    }
+    if cuda_major >= 13:
+        wheel_env["CU13_BUILD"] = "1"
+    run(["./scripts/build_wheel.sh"], cwd=repo_dir, env=wheel_env)
+
+    for f in glob.glob(os.path.join(repo_dir, "mooncake-wheel/dist/*.whl")):
+        shutil.copy2(f, WHEEL_DIR)
+    shutil.rmtree(repo_dir)
+
+
 STEPS = {
     "flash-attn": _build_flash_attn,
     "flash-attn-hopper": _build_flash_attn_hopper,
@@ -174,6 +251,7 @@ STEPS = {
     "mamba-ssm": _build_mamba_ssm,
     "fast-hadamard": _build_fast_hadamard,
     "sgl-router": _build_sgl_router,
+    "mooncake": _build_mooncake,
 }
 
 STEP_NAMES = ", ".join(STEPS)
