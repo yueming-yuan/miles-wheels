@@ -11,7 +11,8 @@ import typer
 
 app = typer.Typer(help="Install and test GPU wheels.")
 
-STEP_NAMES = "flash-attn, flash-attn-hopper, apex, int4_qat, te, sgl-model-gateway"
+STEP_NAMES = ("flash-attn, flash-attn-hopper, apex, int4_qat, te, "
+              "causal-conv1d, mamba-ssm, fast-hadamard, sgl-model-gateway")
 
 
 def run(cmd, *, env=None):
@@ -76,6 +77,21 @@ def _install_te(wheel_dir: str):
         run([sys.executable, "-m", "pip", "install", whl])
 
 
+def _install_causal_conv1d(wheel_dir: str):
+    whl = _find_wheel(wheel_dir, "causal_conv1d-*.whl")
+    run([sys.executable, "-m", "pip", "install", whl])
+
+
+def _install_mamba_ssm(wheel_dir: str):
+    whl = _find_wheel(wheel_dir, "mamba_ssm-*.whl")
+    run([sys.executable, "-m", "pip", "install", whl])
+
+
+def _install_fast_hadamard(wheel_dir: str):
+    whl = _find_wheel(wheel_dir, "fast_hadamard_transform-*.whl")
+    run([sys.executable, "-m", "pip", "install", whl])
+
+
 def _install_sgl_model_gateway(wheel_dir: str):
     # Install the Python wheel (package name: sglang-router, wheel: sglang_router-*.whl)
     whl = _find_wheel(wheel_dir, "sglang_router-*.whl")
@@ -101,6 +117,9 @@ INSTALL_STEPS = {
     "apex": _install_apex,
     "int4_qat": _install_int4_qat,
     "te": _install_te,
+    "causal-conv1d": _install_causal_conv1d,
+    "mamba-ssm": _install_mamba_ssm,
+    "fast-hadamard": _install_fast_hadamard,
     "sgl-model-gateway": _install_sgl_model_gateway,
 }
 
@@ -150,6 +169,35 @@ def _test_te():
     print("transformer_engine import: OK")
 
 
+def _test_causal_conv1d():
+    import torch
+    from causal_conv1d import causal_conv1d_fn
+    x = torch.randn(2, 64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    w = torch.randn(64, 4, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = causal_conv1d_fn(x, w)
+    out.sum().backward()
+    print("causal-conv1d backward: OK")
+
+
+def _test_mamba_ssm():
+    import torch
+    from mamba_ssm import Mamba
+    model = Mamba(d_model=64, d_state=16, d_conv=4, expand=2).cuda().to(torch.bfloat16)
+    x = torch.randn(2, 32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = model(x)
+    out.sum().backward()
+    print("mamba-ssm Mamba forward+backward: OK")
+
+
+def _test_fast_hadamard():
+    import torch
+    from fast_hadamard_transform import hadamard_transform
+    x = torch.randn(4, 512, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = hadamard_transform(x)
+    out.sum().backward()
+    print("fast-hadamard-transform backward: OK")
+
+
 def _test_sgl_model_gateway():
     import sglang_router  # noqa: F401
     print("sglang_router import: OK")
@@ -164,6 +212,9 @@ TEST_STEPS = {
     "flash-attn-hopper": _test_flash_attn_hopper,
     "apex": _test_apex,
     "int4_qat": _test_int4_qat,
+    "causal-conv1d": _test_causal_conv1d,
+    "mamba-ssm": _test_mamba_ssm,
+    "fast-hadamard": _test_fast_hadamard,
     "sgl-model-gateway": _test_sgl_model_gateway,
 }
 

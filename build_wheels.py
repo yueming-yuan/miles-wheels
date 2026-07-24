@@ -3,10 +3,12 @@
 
 import argparse
 import glob
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import build_sglang_gateway
 
@@ -122,6 +124,40 @@ def _build_transformer_engine(args):
         )
 
 
+def _build_causal_conv1d(args):
+    # FORCE_BUILD: upstream setup.py otherwise downloads its own prebuilt wheel
+    # when one matches, which never exists for aarch64/cu13 and may mismatch
+    # this image's torch build on x86.
+    run(
+        [sys.executable, "-m", "pip", "wheel",
+         "causal-conv1d==1.6.1",
+         "-v", "--no-build-isolation", "--no-deps",
+         "-w", WHEEL_DIR],
+        env={"CAUSAL_CONV1D_FORCE_BUILD": "TRUE", "MAX_JOBS": "64"},
+    )
+
+
+def _build_mamba_ssm(args):
+    # FORCE_BUILD: same reason as causal-conv1d.
+    run(
+        [sys.executable, "-m", "pip", "wheel",
+         "mamba-ssm==2.3.1",
+         "-v", "--no-build-isolation", "--no-deps",
+         "-w", WHEEL_DIR],
+        env={"MAMBA_FORCE_BUILD": "TRUE", "MAX_JOBS": "64"},
+    )
+
+
+def _build_fast_hadamard(args):
+    run(
+        [sys.executable, "-m", "pip", "wheel",
+         "git+https://github.com/Dao-AILab/fast-hadamard-transform.git@e7706faf8d1c3b9f241e36860640ad1dac644ede",
+         "-v", "--no-build-isolation", "--no-deps",
+         "-w", WHEEL_DIR],
+        env={"MAX_JOBS": "64"},
+    )
+
+
 def _build_sgl_router(args):
     """Build sgl-router Python wheel and standalone binary from source."""
     cfg = build_sglang_gateway.BuildConfig(bootstrap_rust=args.bootstrap_rust)
@@ -134,6 +170,9 @@ STEPS = {
     "apex": _build_apex,
     "int4_qat": _build_int4_qat,
     "te": _build_transformer_engine,
+    "causal-conv1d": _build_causal_conv1d,
+    "mamba-ssm": _build_mamba_ssm,
+    "fast-hadamard": _build_fast_hadamard,
     "sgl-router": _build_sgl_router,
 }
 
@@ -160,42 +199,81 @@ def cmd_build(args):
     run(["ls", "-lh", WHEEL_DIR])
 
 
+def _gh_json(gh_args):
+    out = subprocess.check_output(["gh", *gh_args], text=True)
+    return json.loads(out)
+
+
+def _latest_versioned_release(tag):
+    """Newest legacy cu<cuda>-<arch>-vX.Y.Z release, used to seed a fresh rolling tag."""
+    releases = _gh_json(["release", "list", "--repo", REPO, "--limit", "100",
+                         "--json", "tagName,createdAt"])
+    candidates = [r for r in releases if r["tagName"].startswith(tag + "-v")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda r: r["createdAt"])["tagName"]
+
+
 def cmd_upload(args):
-    """Upload all wheels in /tmp/wheels as a GitHub release."""
+    """Sync wheels in /tmp/wheels into the rolling cu<cuda>-<arch> release.
+
+    The release is never deleted: unchanged assets stay, new packages are
+    added, and a wheel whose version changed replaces its old asset. A fresh
+    tag is seeded from the newest legacy versioned release so the set stays
+    complete (the miles Dockerfile downloads every asset of one tag).
+    """
     assert args.cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
 
     cuda_major, cuda_minor = args.cuda[:2], args.cuda[2:]
     arch_str = "x86_64" if args.arch == "x86" else args.arch
-    tag = f"cu{args.cuda}-{arch_str}-v{args.version}"
-    title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str} (v{args.version})"
+    tag = f"cu{args.cuda}-{arch_str}"
+    title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str}"
 
-    wheels = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.whl")))
-    tarballs = sorted(glob.glob(os.path.join(WHEEL_DIR, "*.tar.gz")))
-    assets = wheels + tarballs
-    if not assets:
+    local = (sorted(glob.glob(os.path.join(WHEEL_DIR, "*.whl")))
+             + sorted(glob.glob(os.path.join(WHEEL_DIR, "*.tar.gz"))))
+    if not local:
         print(f"No .whl or .tar.gz files found in {WHEEL_DIR}")
         sys.exit(1)
 
-    names = [os.path.splitext(os.path.basename(w))[0].split("-")[0] for w in wheels]
-    body = "Pre-built wheels: " + ", ".join(names)
-
-    print(f"\nUploading {len(assets)} assets as release '{tag}'")
-    for a in assets:
-        print(f"  {os.path.basename(a)}")
-
-    # Delete existing release with same tag (if any)
-    subprocess.run(
-        ["gh", "release", "delete", tag, "--repo", REPO, "--yes", "--cleanup-tag"],
+    exists = subprocess.run(
+        ["gh", "release", "view", tag, "--repo", REPO],
         capture_output=True,
-    )
+    ).returncode == 0
 
-    run(["gh", "release", "create", tag,
-         "--repo", REPO,
-         "--title", title,
-         "--notes", body,
-         *assets])
+    if not exists:
+        run(["gh", "release", "create", tag, "--repo", REPO, "--title", title,
+             "--notes", f"Rolling wheel set for CUDA {cuda_major}.{cuda_minor} / {arch_str}."])
+        seed = _latest_versioned_release(tag)
+        if seed:
+            print(f"Seeding {tag} from legacy release {seed}")
+            seed_dir = tempfile.mkdtemp(prefix="seed-wheels-")
+            run(["gh", "release", "download", seed, "--repo", REPO, "--dir", seed_dir])
+            for f in sorted(os.listdir(seed_dir)):
+                run(["gh", "release", "upload", tag, os.path.join(seed_dir, f), "--repo", REPO])
+            shutil.rmtree(seed_dir)
 
-    print(f"\nRelease created: https://github.com/{REPO}/releases/tag/{tag}")
+    remote = {a["name"] for a in
+              _gh_json(["release", "view", tag, "--repo", REPO, "--json", "assets"])["assets"]}
+
+    print(f"\nSyncing {len(local)} local assets into release '{tag}'")
+    for path in local:
+        name = os.path.basename(path)
+        if name.endswith(".whl"):
+            # A version bump changes the wheel filename; drop the superseded
+            # asset so the Dockerfile's <dist>-*.whl glob stays unambiguous.
+            dist = name.split("-")[0]
+            for stale in [r for r in remote
+                          if r.endswith(".whl") and r.split("-")[0] == dist and r != name]:
+                run(["gh", "release", "delete-asset", tag, stale, "--repo", REPO, "--yes"])
+                remote.discard(stale)
+        run(["gh", "release", "upload", tag, path, "--repo", REPO, "--clobber"])
+        remote.add(name)
+
+    names = sorted({r.split("-")[0] for r in remote if r.endswith(".whl")})
+    run(["gh", "release", "edit", tag, "--repo", REPO, "--title", title,
+         "--notes", "Pre-built wheels: " + ", ".join(names)])
+
+    print(f"\nRelease synced: https://github.com/{REPO}/releases/tag/{tag}")
 
 
 def main():
@@ -212,11 +290,10 @@ def main():
     p_build.set_defaults(func=cmd_build, bootstrap_rust=True)
 
     # ── upload ───────────────────────────────────────────────
-    p_upload = sub.add_parser("upload", help="Upload all wheels as a GitHub release")
+    p_upload = sub.add_parser(
+        "upload", help="Sync /tmp/wheels into the rolling cu<cuda>-<arch> release")
     p_upload.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_upload.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
-    p_upload.add_argument("--version", required=True,
-                          help="Wheels release version X.Y.Z; tag becomes cu<cuda>-<arch>-vX.Y.Z")
     p_upload.set_defaults(func=cmd_upload)
 
     args = parser.parse_args()
