@@ -12,7 +12,7 @@ import typer
 app = typer.Typer(help="Install and test GPU wheels.")
 
 STEP_NAMES = ("flash-attn, flash-attn-hopper, apex, int4_qat, te, "
-              "causal-conv1d, mamba-ssm, fast-hadamard, sgl-model-gateway")
+              "causal-conv1d, mamba-ssm, fast-hadamard, sgl-model-gateway, mooncake")
 
 
 def run(cmd, *, env=None):
@@ -111,6 +111,12 @@ def _install_sgl_model_gateway(wheel_dir: str):
     print("Installed sgl-model-gateway binary to /usr/local/bin/")
 
 
+def _install_mooncake(wheel_dir: str):
+    # Same dist name as the base image's mooncake; force-reinstall to replace it.
+    whl = _find_wheel(wheel_dir, "mooncake_transfer_engine*-*.whl")
+    run([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", whl])
+
+
 INSTALL_STEPS = {
     "flash-attn": _install_flash_attn,
     "flash-attn-hopper": _install_flash_attn_hopper,
@@ -121,6 +127,7 @@ INSTALL_STEPS = {
     "mamba-ssm": _install_mamba_ssm,
     "fast-hadamard": _install_fast_hadamard,
     "sgl-model-gateway": _install_sgl_model_gateway,
+    "mooncake": _install_mooncake,
 }
 
 
@@ -207,6 +214,22 @@ def _test_sgl_model_gateway():
     print("sgl-model-gateway binary: OK")
 
 
+def _test_mooncake():
+    import shutil
+
+    from mooncake.store import MooncakeDistributedStore  # noqa: F401
+    from mooncake.structured_object_store import (  # noqa: F401
+        FieldSchema,
+        MooncakeBundleTransfer,
+        export_ref,
+        import_ref,
+    )
+    for method in ("put", "get", "release_result", "cleanup_dataproto"):
+        assert hasattr(MooncakeBundleTransfer, method), f"MooncakeBundleTransfer.{method} missing"
+    assert shutil.which("mooncake_master"), "mooncake_master binary not on PATH"
+    print("mooncake structured object store API + master binary: OK")
+
+
 TEST_STEPS = {
     "flash-attn": _test_flash_attn,
     "flash-attn-hopper": _test_flash_attn_hopper,
@@ -216,6 +239,7 @@ TEST_STEPS = {
     "mamba-ssm": _test_mamba_ssm,
     "fast-hadamard": _test_fast_hadamard,
     "sgl-model-gateway": _test_sgl_model_gateway,
+    "mooncake": _test_mooncake,
 }
 
 
