@@ -127,6 +127,7 @@ def _build_te_core_aarch64():
         # manylinux_2_28_aarch64 common-only release recipe.
         run([
             "docker", "build", "--no-cache",
+            "--network", "host",
             "--build-arg", "CUDA_MAJOR=13",
             "--build-arg", "CUDA_MINOR=0",
             "--build-arg", "BUILD_METAPACKAGE=false",
@@ -140,6 +141,7 @@ def _build_te_core_aarch64():
         image_built = True
         run([
             "docker", "run", "--rm",
+            "--network", "host",
             "--env", f"TARGET_BRANCH={TE_COMMIT}",
             "--mount", f"type=bind,source={WHEEL_DIR},target=/wheelhouse",
             image_tag,

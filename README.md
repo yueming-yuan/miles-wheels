@@ -23,7 +23,8 @@ python build_wheels.py upload --cuda 129 --arch x86
 
 The aarch64 core build runs NVIDIA's pinned manylinux recipe in Docker.
 
-It needs a Docker daemon but not the NVIDIA container runtime.
+It needs a Docker daemon with host-network support but not the NVIDIA
+container runtime.
 
 ```shell
 python build_wheels.py build --cuda 130 --arch aarch64
