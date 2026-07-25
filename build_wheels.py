@@ -2,6 +2,7 @@
 """Build GPU wheels (flash-attn, apex, transformer_engine, etc.)."""
 
 import argparse
+from email.parser import BytesParser
 import glob
 import json
 import os
@@ -11,8 +12,11 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import zipfile
 
 import build_sglang_gateway
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 WHEEL_DIR = os.environ.get("WHEEL_DIR", "/tmp/wheels")
 if not os.path.isabs(WHEEL_DIR):
@@ -198,6 +202,47 @@ def _validate_te_build_environment(args):
         )
 
 
+def _validate_te_torch_wheel(path, core_dist):
+    with zipfile.ZipFile(path) as wheel:
+        metadata_paths = [
+            name for name in wheel.namelist()
+            if name.endswith(".dist-info/METADATA")
+        ]
+        if len(metadata_paths) != 1:
+            raise RuntimeError(
+                f"Expected one METADATA file in {path}, found {metadata_paths}"
+            )
+        metadata = BytesParser().parsebytes(wheel.read(metadata_paths[0]))
+
+    expected_name = canonicalize_name("transformer_engine_torch")
+    if canonicalize_name(metadata["Name"]) != expected_name:
+        raise RuntimeError(
+            f"Unexpected Transformer Engine torch wheel name: {metadata['Name']}"
+        )
+    if metadata["Version"] != TE_VERSION:
+        raise RuntimeError(
+            f"Unexpected Transformer Engine torch wheel version: {metadata['Version']}"
+        )
+
+    requirements = [
+        Requirement(value)
+        for value in metadata.get_all("Requires-Dist", [])
+    ]
+    core_requirements = [
+        requirement for requirement in requirements
+        if canonicalize_name(requirement.name).startswith("transformer-engine-cu")
+    ]
+    expected_core = canonicalize_name(core_dist)
+    if (
+        len(core_requirements) != 1
+        or canonicalize_name(core_requirements[0].name) != expected_core
+        or str(core_requirements[0].specifier) != f"=={TE_VERSION}"
+    ):
+        raise RuntimeError(
+            f"Expected {core_dist}=={TE_VERSION} in {path}, found {core_requirements}"
+        )
+
+
 def _build_transformer_engine(args):
     _validate_te_build_environment(args)
     cuda_major = int(args.cuda[:2])
@@ -242,6 +287,7 @@ def _build_transformer_engine(args):
     ])
     run(
         [sys.executable, "-m", "pip", "wheel",
+         "--no-cache-dir",
          f"transformer_engine_torch=={TE_VERSION}",
          "-v", "--no-build-isolation", "--no-deps",
          "-w", WHEEL_DIR],
@@ -264,6 +310,7 @@ def _build_transformer_engine(args):
     ]
     if missing:
         raise RuntimeError(f"Missing Transformer Engine wheel(s): {missing}")
+    _validate_te_torch_wheel(os.path.join(WHEEL_DIR, expected[2]), core_dist)
 
 
 def _build_causal_conv1d(args):
