@@ -203,9 +203,8 @@ def _test_te():
         "transformer-engine-torch",
     )
     versions = {package: importlib.metadata.version(package) for package in packages}
-    expected_version = {"12": "2.10.0", "13": "2.17.0"}[cuda_major]
-    assert set(versions.values()) == {expected_version}, (
-        f"Expected Transformer Engine {expected_version}, found {versions}"
+    assert set(versions.values()) == {"2.17.0"}, (
+        f"Expected Transformer Engine 2.17.0, found {versions}"
     )
 
     model = te.Linear(64, 64, params_dtype=torch.bfloat16).cuda()

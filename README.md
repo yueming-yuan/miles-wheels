@@ -7,9 +7,11 @@ whose version changed replaces its old asset, unchanged assets are left
 alone — no full re-upload. The first `upload` to a fresh tag seeds it from
 the newest legacy `cu<cuda>-<arch>-vX.Y.Z` release.
 
-`WHEEL_DIR` defaults to `/tmp/wheels`; set it to an absolute path on another disk.
+`WHEEL_DIR` defaults to `/tmp/wheels`; any override must be an absolute path.
 
 `build --only <step> ...` writes only that step to `WHEEL_DIR`; `upload` touches only those assets.
+
+All supported CUDA targets use Transformer Engine 2.17. CUDA 12.9 supports only x86_64.
 
 ### cu12.9 + x86_64
 ```shell

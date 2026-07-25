@@ -5,14 +5,19 @@ import argparse
 import glob
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 
 import build_sglang_gateway
 
 WHEEL_DIR = os.environ.get("WHEEL_DIR", "/tmp/wheels")
+if not os.path.isabs(WHEEL_DIR):
+    raise ValueError(f"WHEEL_DIR must be an absolute path, got {WHEEL_DIR!r}")
+
 REPO = "yueming-yuan/miles-wheels"
 TE_VERSION = "2.17.0"
 TE_COMMIT = "2e559f062497bef768dfbe9d7e45548fadeca80a"
@@ -103,39 +108,99 @@ def _build_int4_qat(args):
 
 def _build_te_core_aarch64():
     repo_dir = tempfile.mkdtemp(prefix="transformer-engine-")
-    image_tag = f"miles-wheels-transformer-engine:{TE_VERSION}-aarch64-{os.getpid()}"
+    image_tag = (
+        f"miles-wheels-transformer-engine:"
+        f"{TE_VERSION}-aarch64-{uuid.uuid4().hex}"
+    )
+    image_built = False
 
-    run(["git", "clone", "https://github.com/NVIDIA/TransformerEngine.git", repo_dir])
-    run(["git", "checkout", TE_COMMIT], cwd=repo_dir)
-    run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
+    try:
+        run(["git", "clone", "https://github.com/NVIDIA/TransformerEngine.git", repo_dir])
+        run(["git", "checkout", TE_COMMIT], cwd=repo_dir)
+        run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
 
-    # PyPI has no CUDA 13 aarch64 core wheel. Use NVIDIA's fixed
-    # manylinux_2_28_aarch64 common-only release recipe.
-    run([
-        "docker", "build", "--no-cache",
-        "--build-arg", "CUDA_MAJOR=13",
-        "--build-arg", "CUDA_MINOR=0",
-        "--build-arg", "BUILD_METAPACKAGE=false",
-        "--build-arg", "BUILD_COMMON=true",
-        "--build-arg", "BUILD_PYTORCH=false",
-        "--build-arg", "BUILD_JAX=false",
-        "--tag", image_tag,
-        "--file", os.path.join(repo_dir, "build_tools/wheel_utils/Dockerfile.aarch"),
-        repo_dir,
-    ])
-    run([
-        "docker", "run", "--rm",
-        "--env", f"TARGET_BRANCH={TE_COMMIT}",
-        "--mount", f"type=bind,source={WHEEL_DIR},target=/wheelhouse",
-        image_tag,
-    ])
-    run(["docker", "image", "rm", image_tag])
-    shutil.rmtree(repo_dir)
+        # PyPI has no CUDA 13 aarch64 core wheel. Use NVIDIA's fixed
+        # manylinux_2_28_aarch64 common-only release recipe.
+        run([
+            "docker", "build", "--no-cache",
+            "--build-arg", "CUDA_MAJOR=13",
+            "--build-arg", "CUDA_MINOR=0",
+            "--build-arg", "BUILD_METAPACKAGE=false",
+            "--build-arg", "BUILD_COMMON=true",
+            "--build-arg", "BUILD_PYTORCH=false",
+            "--build-arg", "BUILD_JAX=false",
+            "--tag", image_tag,
+            "--file", os.path.join(repo_dir, "build_tools/wheel_utils/Dockerfile.aarch"),
+            repo_dir,
+        ])
+        image_built = True
+        run([
+            "docker", "run", "--rm",
+            "--env", f"TARGET_BRANCH={TE_COMMIT}",
+            "--mount", f"type=bind,source={WHEEL_DIR},target=/wheelhouse",
+            image_tag,
+        ])
+    finally:
+        if image_built:
+            try:
+                result = subprocess.run(
+                    ["docker", "image", "rm", image_tag],
+                    check=False,
+                )
+            except OSError as exc:
+                print(f"WARNING: Failed to remove Docker image {image_tag}: {exc}")
+            else:
+                if result.returncode != 0:
+                    print(
+                        f"WARNING: Failed to remove Docker image {image_tag} "
+                        f"(exit code {result.returncode})"
+                    )
+        try:
+            shutil.rmtree(repo_dir)
+        except OSError as exc:
+            print(f"WARNING: Failed to remove Transformer Engine source {repo_dir}: {exc}")
+
+
+def _validate_te_build_environment(args):
+    expected_arch = "x86_64" if args.arch == "x86" else "aarch64"
+    machine = platform.machine()
+    if machine != expected_arch:
+        raise RuntimeError(
+            f"Transformer Engine target arch is {expected_arch}, running on {machine}"
+        )
+
+    if sys.version_info[:2] != (3, 12):
+        raise RuntimeError(
+            "Transformer Engine release wheels require Python 3.12, "
+            f"running on {sys.version_info.major}.{sys.version_info.minor}"
+        )
+
+    expected_cuda = f"{args.cuda[:2]}.{args.cuda[2:]}"
+    torch_cuda = subprocess.check_output(
+        [sys.executable, "-c", "import torch; print(torch.version.cuda)"],
+        text=True,
+    ).strip()
+    if torch_cuda != expected_cuda:
+        raise RuntimeError(
+            f"Transformer Engine target CUDA is {expected_cuda}, "
+            f"but torch was built for CUDA {torch_cuda}"
+        )
+
+    nvcc_output = subprocess.check_output(
+        ["nvcc", "--version"],
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if f"release {expected_cuda}," not in nvcc_output:
+        raise RuntimeError(
+            f"Transformer Engine target CUDA is {expected_cuda}, "
+            "but nvcc reports a different toolkit"
+        )
 
 
 def _build_transformer_engine(args):
+    _validate_te_build_environment(args)
     cuda_major = int(args.cuda[:2])
-    version = TE_VERSION if cuda_major >= 13 else "2.10.0"
     core_dist = f"transformer_engine_cu{cuda_major}"
 
     for pattern in (
@@ -146,12 +211,11 @@ def _build_transformer_engine(args):
         for path in glob.glob(os.path.join(WHEEL_DIR, pattern)):
             os.remove(path)
 
-    if cuda_major >= 13:
-        run([sys.executable, "-m", "pip", "install", "nvidia-mathdx==25.6.0"])
+    run([sys.executable, "-m", "pip", "install", "nvidia-mathdx==25.6.0"])
     run([
         sys.executable, "-m", "pip", "download",
         "--only-binary=:all:", "--no-deps",
-        f"transformer_engine=={version}",
+        f"transformer_engine=={TE_VERSION}",
         "--dest", WHEEL_DIR,
     ])
 
@@ -159,18 +223,18 @@ def _build_transformer_engine(args):
         run([
             sys.executable, "-m", "pip", "download",
             "--only-binary=:all:", "--no-deps",
-            f"{core_dist}=={version}",
+            f"{core_dist}=={TE_VERSION}",
             "--dest", WHEEL_DIR,
         ])
     else:
         _build_te_core_aarch64()
 
     core_wheels = glob.glob(
-        os.path.join(WHEEL_DIR, f"{core_dist}-{version}-*.whl")
+        os.path.join(WHEEL_DIR, f"{core_dist}-{TE_VERSION}-*.whl")
     )
     if len(core_wheels) != 1:
         raise RuntimeError(
-            f"Expected one {core_dist} {version} wheel, found {core_wheels}"
+            f"Expected one {core_dist} {TE_VERSION} wheel, found {core_wheels}"
         )
     run([
         sys.executable, "-m", "pip", "install",
@@ -178,18 +242,21 @@ def _build_transformer_engine(args):
     ])
     run(
         [sys.executable, "-m", "pip", "wheel",
-         f"transformer_engine_torch=={version}",
+         f"transformer_engine_torch=={TE_VERSION}",
          "-v", "--no-build-isolation", "--no-deps",
          "-w", WHEEL_DIR],
-        env={"NVTE_PYTORCH_FORCE_BUILD": "TRUE"},
+        env={
+            "NVTE_NO_LOCAL_VERSION": "1",
+            "NVTE_PYTORCH_FORCE_BUILD": "TRUE",
+        },
     )
 
     arch = "x86_64" if args.arch == "x86" else args.arch
     python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     expected = [
-        f"transformer_engine-{version}-py3-none-any.whl",
-        f"{core_dist}-{version}-py3-none-manylinux_2_28_{arch}.whl",
-        f"transformer_engine_torch-{version}-{python_tag}-{python_tag}-linux_{arch}.whl",
+        f"transformer_engine-{TE_VERSION}-py3-none-any.whl",
+        f"{core_dist}-{TE_VERSION}-py3-none-manylinux_2_28_{arch}.whl",
+        f"transformer_engine_torch-{TE_VERSION}-{python_tag}-{python_tag}-linux_{arch}.whl",
     ]
     missing = [
         name for name in expected
@@ -334,9 +401,16 @@ STEP_NAMES = ", ".join(STEPS)
 
 # ── commands ─────────────────────────────────────────────────
 
+def _validate_target(args):
+    if args.cuda not in ("129", "130"):
+        raise ValueError("currently only cu129 and cu130 are supported")
+    if args.cuda == "129" and args.arch != "x86":
+        raise ValueError("cu129 currently supports only --arch x86")
+
+
 def cmd_build(args):
     """Build all GPU wheels into the wheel output directory."""
-    assert args.cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
+    _validate_target(args)
     _setup_env(args)
     os.makedirs(WHEEL_DIR, exist_ok=True)
 
@@ -375,7 +449,7 @@ def cmd_upload(args):
     tag is seeded from the newest legacy versioned release so the set stays
     complete (the miles Dockerfile downloads every asset of one tag).
     """
-    assert args.cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
+    _validate_target(args)
 
     cuda_major, cuda_minor = args.cuda[:2], args.cuda[2:]
     arch_str = "x86_64" if args.arch == "x86" else args.arch
