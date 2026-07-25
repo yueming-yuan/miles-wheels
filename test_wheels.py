@@ -2,6 +2,7 @@
 """Install and test GPU wheels built by build_wheels.py."""
 
 import glob
+import importlib.metadata
 import os
 import subprocess
 import sys
@@ -73,8 +74,28 @@ def _install_int4_qat(wheel_dir: str):
 
 
 def _install_te(wheel_dir: str):
-    for whl in glob.glob(os.path.join(wheel_dir, "transformer_engine*.whl")):
-        run([sys.executable, "-m", "pip", "install", whl])
+    patterns = (
+        "transformer_engine-[0-9]*.whl",
+        "transformer_engine_cu1[23]-*.whl",
+        "transformer_engine_torch-*.whl",
+    )
+    matches = {
+        pattern: glob.glob(os.path.join(wheel_dir, pattern))
+        for pattern in patterns
+    }
+    invalid = {pattern: found for pattern, found in matches.items() if len(found) != 1}
+    if invalid:
+        raise RuntimeError(
+            f"Expected exactly one wheel for each Transformer Engine dist: {invalid}"
+        )
+    wheels = [matches[pattern][0] for pattern in patterns]
+    versions = {os.path.basename(whl).split("-")[1] for whl in wheels}
+    if len(versions) != 1:
+        raise RuntimeError(f"Transformer Engine wheel versions do not match: {wheels}")
+    run([
+        sys.executable, "-m", "pip", "install",
+        "--force-reinstall", "--no-deps", *wheels,
+    ])
 
 
 def _install_causal_conv1d(wheel_dir: str):
@@ -172,8 +193,26 @@ def _test_int4_qat():
 
 
 def _test_te():
-    import transformer_engine.pytorch as te  # noqa: F401
-    print("transformer_engine import: OK")
+    import torch
+    import transformer_engine.pytorch as te
+
+    cuda_major = torch.version.cuda.split(".", maxsplit=1)[0]
+    packages = (
+        "transformer-engine",
+        f"transformer-engine-cu{cuda_major}",
+        "transformer-engine-torch",
+    )
+    versions = {package: importlib.metadata.version(package) for package in packages}
+    expected_version = {"12": "2.10.0", "13": "2.17.0"}[cuda_major]
+    assert set(versions.values()) == {expected_version}, (
+        f"Expected Transformer Engine {expected_version}, found {versions}"
+    )
+
+    model = te.Linear(64, 64, params_dtype=torch.bfloat16).cuda()
+    x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    model(x).sum().backward()
+    assert x.grad is not None
+    print(f"transformer_engine {next(iter(versions.values()))} Linear forward+backward: OK")
 
 
 def _test_causal_conv1d():
@@ -235,6 +274,7 @@ TEST_STEPS = {
     "flash-attn-hopper": _test_flash_attn_hopper,
     "apex": _test_apex,
     "int4_qat": _test_int4_qat,
+    "te": _test_te,
     "causal-conv1d": _test_causal_conv1d,
     "mamba-ssm": _test_mamba_ssm,
     "fast-hadamard": _test_fast_hadamard,

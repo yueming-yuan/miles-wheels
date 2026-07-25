@@ -12,8 +12,10 @@ import tempfile
 
 import build_sglang_gateway
 
-WHEEL_DIR = "/tmp/wheels"
+WHEEL_DIR = os.environ.get("WHEEL_DIR", "/tmp/wheels")
 REPO = "yueming-yuan/miles-wheels"
+TE_VERSION = "2.17.0"
+TE_COMMIT = "2e559f062497bef768dfbe9d7e45548fadeca80a"
 
 
 def run(cmd, *, env=None, cwd=None):
@@ -99,29 +101,102 @@ def _build_int4_qat(args):
     )
 
 
+def _build_te_core_aarch64():
+    repo_dir = tempfile.mkdtemp(prefix="transformer-engine-")
+    image_tag = f"miles-wheels-transformer-engine:{TE_VERSION}-aarch64-{os.getpid()}"
+
+    run(["git", "clone", "https://github.com/NVIDIA/TransformerEngine.git", repo_dir])
+    run(["git", "checkout", TE_COMMIT], cwd=repo_dir)
+    run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
+
+    # PyPI has no CUDA 13 aarch64 core wheel. Use NVIDIA's fixed
+    # manylinux_2_28_aarch64 common-only release recipe.
+    run([
+        "docker", "build", "--no-cache",
+        "--build-arg", "CUDA_MAJOR=13",
+        "--build-arg", "CUDA_MINOR=0",
+        "--build-arg", "BUILD_METAPACKAGE=false",
+        "--build-arg", "BUILD_COMMON=true",
+        "--build-arg", "BUILD_PYTORCH=false",
+        "--build-arg", "BUILD_JAX=false",
+        "--tag", image_tag,
+        "--file", os.path.join(repo_dir, "build_tools/wheel_utils/Dockerfile.aarch"),
+        repo_dir,
+    ])
+    run([
+        "docker", "run", "--rm",
+        "--env", f"TARGET_BRANCH={TE_COMMIT}",
+        "--mount", f"type=bind,source={WHEEL_DIR},target=/wheelhouse",
+        image_tag,
+    ])
+    run(["docker", "image", "rm", image_tag])
+    shutil.rmtree(repo_dir)
+
+
 def _build_transformer_engine(args):
     cuda_major = int(args.cuda[:2])
+    version = TE_VERSION if cuda_major >= 13 else "2.10.0"
+    core_dist = f"transformer_engine_cu{cuda_major}"
+
+    for pattern in (
+        "transformer_engine-*.whl",
+        "transformer_engine_cu1[23]-*.whl",
+        "transformer_engine_torch-*.whl",
+    ):
+        for path in glob.glob(os.path.join(WHEEL_DIR, pattern)):
+            os.remove(path)
+
     if cuda_major >= 13:
-        extras = "core_cu13,pytorch"
-        version = "2.12.0"
         run([sys.executable, "-m", "pip", "install", "nvidia-mathdx==25.6.0"])
-        run([sys.executable, "-m", "pip", "install", f"transformer_engine_cu13=={version}"])
+    run([
+        sys.executable, "-m", "pip", "download",
+        "--only-binary=:all:", "--no-deps",
+        f"transformer_engine=={version}",
+        "--dest", WHEEL_DIR,
+    ])
+
+    if cuda_major < 13 or args.arch == "x86":
+        run([
+            sys.executable, "-m", "pip", "download",
+            "--only-binary=:all:", "--no-deps",
+            f"{core_dist}=={version}",
+            "--dest", WHEEL_DIR,
+        ])
     else:
-        extras = "pytorch"
-        version = "2.10.0"
+        _build_te_core_aarch64()
+
+    core_wheels = glob.glob(
+        os.path.join(WHEEL_DIR, f"{core_dist}-{version}-*.whl")
+    )
+    if len(core_wheels) != 1:
+        raise RuntimeError(
+            f"Expected one {core_dist} {version} wheel, found {core_wheels}"
+        )
+    run([
+        sys.executable, "-m", "pip", "install",
+        "--force-reinstall", "--no-deps", core_wheels[0],
+    ])
     run(
         [sys.executable, "-m", "pip", "wheel",
-         f"transformer_engine[{extras}]=={version}",
+         f"transformer_engine_torch=={version}",
          "-v", "--no-build-isolation", "--no-deps",
          "-w", WHEEL_DIR],
+        env={"NVTE_PYTORCH_FORCE_BUILD": "TRUE"},
     )
-    if cuda_major >= 13:
-        run(
-            [sys.executable, "-m", "pip", "wheel",
-             f"transformer_engine_torch=={version}",
-             "-v", "--no-build-isolation", "--no-deps",
-             "-w", WHEEL_DIR],
-        )
+
+    arch = "x86_64" if args.arch == "x86" else args.arch
+    python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    expected = [
+        f"transformer_engine-{version}-py3-none-any.whl",
+        f"{core_dist}-{version}-py3-none-manylinux_2_28_{arch}.whl",
+        f"transformer_engine_torch-{version}-{python_tag}-{python_tag}-linux_{arch}.whl",
+    ]
+    missing = [
+        name for name in expected
+        if not os.path.isfile(os.path.join(WHEEL_DIR, name))
+    ]
+    if missing:
+        raise RuntimeError(f"Missing Transformer Engine wheel(s): {missing}")
 
 
 def _build_causal_conv1d(args):
@@ -260,7 +335,7 @@ STEP_NAMES = ", ".join(STEPS)
 # ── commands ─────────────────────────────────────────────────
 
 def cmd_build(args):
-    """Build all GPU wheels into /tmp/wheels."""
+    """Build all GPU wheels into the wheel output directory."""
     assert args.cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
     _setup_env(args)
     os.makedirs(WHEEL_DIR, exist_ok=True)
@@ -293,7 +368,7 @@ def _latest_versioned_release(tag):
 
 
 def cmd_upload(args):
-    """Sync wheels in /tmp/wheels into the rolling cu<cuda>-<arch> release.
+    """Sync the wheel output directory into the rolling cu<cuda>-<arch> release.
 
     The release is never deleted: unchanged assets stay, new packages are
     added, and a wheel whose version changed replaces its old asset. A fresh
@@ -359,7 +434,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── build ────────────────────────────────────────────────
-    p_build = sub.add_parser("build", help="Build all GPU wheels into /tmp/wheels")
+    p_build = sub.add_parser(
+        "build", help="Build all GPU wheels into the wheel output directory")
     p_build.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_build.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_build.add_argument("--only", nargs="+", help=f"Only run specific steps ({STEP_NAMES})")
@@ -369,7 +445,9 @@ def main():
 
     # ── upload ───────────────────────────────────────────────
     p_upload = sub.add_parser(
-        "upload", help="Sync /tmp/wheels into the rolling cu<cuda>-<arch> release")
+        "upload",
+        help="Sync the wheel output directory into the rolling cu<cuda>-<arch> release",
+    )
     p_upload.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_upload.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_upload.set_defaults(func=cmd_upload)
