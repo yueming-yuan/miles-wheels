@@ -62,12 +62,17 @@ def _build_flash_attn_hopper(args):
         shutil.rmtree(repo_dir)
 
     run(["git", "clone", "https://github.com/Dao-AILab/flash-attention.git", repo_dir])
-    run(["git", "checkout", "fbf24f67cf7f6442c5cfb2c1057f4bfc57e72d89"], cwd=repo_dir)
+    # Must stay >= 00756db: transformer_engine 2.17 passes window_size_left/right
+    # to FA3's _flash_attn_forward/_backward, which older revisions (incl. the
+    # previous pin, 3.0.0b1) only accept as a single window_size tuple.
+    run(["git", "checkout", "00756db9d921da0846453283ddfbeb7457abd09b"], cwd=repo_dir)
     run(["git", "submodule", "update", "--init"], cwd=repo_dir)
     run(
         [sys.executable, "setup.py", "bdist_wheel"],
         cwd=os.path.join(repo_dir, "hopper"),
-        env={"MAX_JOBS": "96"},
+        # Without FORCE_BUILD, setup.py silently downloads a prebuilt release
+        # wheel built against a different CUDA/torch than the image.
+        env={"MAX_JOBS": "96", "FLASH_ATTENTION_FORCE_BUILD": "TRUE"},
     )
 
     hopper_dist = os.path.join(repo_dir, "hopper", "dist")
