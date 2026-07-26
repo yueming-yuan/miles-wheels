@@ -48,19 +48,10 @@ def _install_flash_attn_hopper(wheel_dir: str):
     whl = _find_wheel(wheel_dir, "flash_attn_3-*.whl")
     run([sys.executable, "-m", "pip", "install", whl])
 
-    # Install the hopper Python interface (not included in the wheel)
-    python_path = subprocess.check_output(
-        [sys.executable, "-c", "import site; print(site.getsitepackages()[0])"],
-        text=True,
-    ).strip()
-    interface_dir = os.path.join(python_path, "flash_attn_3")
-    os.makedirs(interface_dir, exist_ok=True)
-    run([
-        "curl", "-fSL",
-        "https://raw.githubusercontent.com/Dao-AILab/flash-attention/"
-        "fbf24f67cf7f6442c5cfb2c1057f4bfc57e72d89/hopper/flash_attn_interface.py",
-        "-o", os.path.join(interface_dir, "flash_attn_interface.py"),
-    ])
+    # The wheel now ships both flash_attn_interface (top-level) and
+    # flash_attn_3.flash_attn_interface (a re-export shim), so nothing extra to
+    # install. Do not drop a copy of the full module at the shim's path: it
+    # re-runs @torch.library.custom_op("flash_attn_3::...") and double-registers.
 
 
 def _install_apex(wheel_dir: str):
