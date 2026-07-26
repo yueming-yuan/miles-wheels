@@ -11,8 +11,12 @@ import sys
 import tempfile
 
 import build_sglang_gateway
+import build_transformer_engine
 
-WHEEL_DIR = "/tmp/wheels"
+WHEEL_DIR = os.environ.get("WHEEL_DIR", "/tmp/wheels")
+if not os.path.isabs(WHEEL_DIR):
+    raise ValueError(f"WHEEL_DIR must be an absolute path, got {WHEEL_DIR!r}")
+
 REPO = "yueming-yuan/miles-wheels"
 
 
@@ -100,28 +104,7 @@ def _build_int4_qat(args):
 
 
 def _build_transformer_engine(args):
-    cuda_major = int(args.cuda[:2])
-    if cuda_major >= 13:
-        extras = "core_cu13,pytorch"
-        version = "2.12.0"
-        run([sys.executable, "-m", "pip", "install", "nvidia-mathdx==25.6.0"])
-        run([sys.executable, "-m", "pip", "install", f"transformer_engine_cu13=={version}"])
-    else:
-        extras = "pytorch"
-        version = "2.10.0"
-    run(
-        [sys.executable, "-m", "pip", "wheel",
-         f"transformer_engine[{extras}]=={version}",
-         "-v", "--no-build-isolation", "--no-deps",
-         "-w", WHEEL_DIR],
-    )
-    if cuda_major >= 13:
-        run(
-            [sys.executable, "-m", "pip", "wheel",
-             f"transformer_engine_torch=={version}",
-             "-v", "--no-build-isolation", "--no-deps",
-             "-w", WHEEL_DIR],
-        )
+    build_transformer_engine.build(args, WHEEL_DIR, run)
 
 
 def _build_causal_conv1d(args):
@@ -259,9 +242,16 @@ STEP_NAMES = ", ".join(STEPS)
 
 # ── commands ─────────────────────────────────────────────────
 
+def _validate_target(args):
+    if args.cuda not in ("129", "130"):
+        raise ValueError("currently only cu129 and cu130 are supported")
+    if args.cuda == "129" and args.arch != "x86":
+        raise ValueError("cu129 currently supports only --arch x86")
+
+
 def cmd_build(args):
-    """Build all GPU wheels into /tmp/wheels."""
-    assert args.cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
+    """Build all GPU wheels into the wheel output directory."""
+    _validate_target(args)
     _setup_env(args)
     os.makedirs(WHEEL_DIR, exist_ok=True)
 
@@ -293,14 +283,14 @@ def _latest_versioned_release(tag):
 
 
 def cmd_upload(args):
-    """Sync wheels in /tmp/wheels into the rolling cu<cuda>-<arch> release.
+    """Sync the wheel output directory into the rolling cu<cuda>-<arch> release.
 
     The release is never deleted: unchanged assets stay, new packages are
     added, and a wheel whose version changed replaces its old asset. A fresh
     tag is seeded from the newest legacy versioned release so the set stays
     complete (the miles Dockerfile downloads every asset of one tag).
     """
-    assert args.cuda in ("129", "130"), "currently only cu129 and cu130 are supported"
+    _validate_target(args)
 
     cuda_major, cuda_minor = args.cuda[:2], args.cuda[2:]
     arch_str = "x86_64" if args.arch == "x86" else args.arch
@@ -359,7 +349,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ── build ────────────────────────────────────────────────
-    p_build = sub.add_parser("build", help="Build all GPU wheels into /tmp/wheels")
+    p_build = sub.add_parser(
+        "build", help="Build all GPU wheels into the wheel output directory")
     p_build.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_build.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_build.add_argument("--only", nargs="+", help=f"Only run specific steps ({STEP_NAMES})")
@@ -369,7 +360,9 @@ def main():
 
     # ── upload ───────────────────────────────────────────────
     p_upload = sub.add_parser(
-        "upload", help="Sync /tmp/wheels into the rolling cu<cuda>-<arch> release")
+        "upload",
+        help="Sync the wheel output directory into the rolling cu<cuda>-<arch> release",
+    )
     p_upload.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_upload.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_upload.set_defaults(func=cmd_upload)
