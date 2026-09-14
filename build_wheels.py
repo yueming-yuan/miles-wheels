@@ -324,8 +324,11 @@ def cmd_upload(args):
 
     cuda_major, cuda_minor = args.cuda[:2], args.cuda[2:]
     arch_str = "x86_64" if args.arch == "x86" else args.arch
-    tag = f"cu{args.cuda}-{arch_str}"
+    torch_part = f"torch{args.torch}-" if args.torch else ""
+    tag = f"cu{args.cuda}-{torch_part}{arch_str}"
     title = f"CUDA {cuda_major}.{cuda_minor} + {arch_str}"
+    if args.torch:
+        title += f" (torch {args.torch[0]}.{args.torch[1:]})"
 
     local = (sorted(glob.glob(os.path.join(WHEEL_DIR, "*.whl")))
              + sorted(glob.glob(os.path.join(WHEEL_DIR, "*.tar.gz"))))
@@ -395,6 +398,7 @@ def main():
     )
     p_upload.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_upload.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
+    p_upload.add_argument("--torch", help="Torch the wheels were built against, e.g. 213; targets the cu<cuda>-torch<torch>-<arch> release the miles Dockerfile pulls")
     p_upload.set_defaults(func=cmd_upload)
 
     args = parser.parse_args()
