@@ -35,7 +35,7 @@ jobs:
             free -h
             sudo apt-get update
             sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
-            python -m pip install maturin==1.14.0 aiohttp
+            python -m pip install maturin==1.14.0 aiohttp packaging
             python build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref b6342a3515e259bbd1eb4db728035a4efbe4fdf9
             python -m pip install /tmp/router-wheels/sglang_router-*.whl
             mkdir -p /tmp/router-bin
