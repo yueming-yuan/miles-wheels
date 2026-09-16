@@ -1,0 +1,53 @@
+name: Build router rolling assets
+on:
+  push:
+    branches: [yueming/router-rolling]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+      WHEEL_DIR: /tmp/router-wheels
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          {
+            df -h /tmp
+            free -h
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
+            python -m pip install maturin==1.14.0 aiohttp
+            python build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref b6342a3515e259bbd1eb4db728035a4efbe4fdf9
+            python -m pip install /tmp/router-wheels/sglang_router-*.whl
+            mkdir -p /tmp/router-bin
+            tar xzf /tmp/router-wheels/sgl-model-gateway-*.tar.gz -C /tmp/router-bin
+            python check_router_forwarding.py --log-dir logs
+            python check_router_forwarding.py --log-dir logs --router-bin /tmp/router-bin/sgl-model-gateway
+            sha256sum /tmp/router-wheels/*
+          } 2>&1 | tee logs/build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: router-${{ matrix.arch }}
+          path: |
+            /tmp/router-wheels/
+            logs/
