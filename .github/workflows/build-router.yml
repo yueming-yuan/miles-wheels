@@ -1,7 +1,7 @@
 name: Build router rolling assets
 on:
   push:
-    branches: [yueming/router-rolling]
+    branches: [jiajun/router-rebuild]
   workflow_dispatch:
 permissions:
   contents: read
@@ -16,9 +16,9 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: '4'
       WHEEL_DIR: /tmp/router-wheels
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
             python -m pip install maturin==1.14.0 aiohttp packaging
-            python build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref b6342a3515e259bbd1eb4db728035a4efbe4fdf9
+            python build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref 0e7c1ac7842317f39a9276af36f5f3a68ed85be8
             python -m pip install /tmp/router-wheels/sglang_router-*.whl
             mkdir -p /tmp/router-bin
             tar xzf /tmp/router-wheels/sgl-model-gateway-*.tar.gz -C /tmp/router-bin
