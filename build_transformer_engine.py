@@ -1,6 +1,18 @@
-"""Build a complete Transformer Engine wheel triplet."""
+"""Build the Transformer Engine wheel triplet from radixark/TransformerEngine.
+
+All three dists come from one fork checkout, versioned "<VERSION.txt>+miles"
+so they can never be mistaken for NVIDIA's PyPI wheels. The build has two
+phases because they need different environments:
+
+  sources  Docker only: NVIDIA's manylinux release recipe builds the
+           transformer_engine metapackage, the transformer_engine_cu<N> core
+           and the transformer_engine_torch sdist.
+  torch    The target image's Python 3.12 / torch / nvcc: compiles
+           transformer_engine_torch from that sdist against the image's torch.
+"""
 
 import glob
+import json
 import os
 import platform
 import shutil
@@ -14,75 +26,47 @@ from email.parser import BytesParser
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-TE_VERSION = "2.17.0"
-TE_COMMIT = "2e559f062497bef768dfbe9d7e45548fadeca80a"
+TE_REPO = "https://github.com/radixark/TransformerEngine.git"
+TE_REF_DEFAULT = "miles-main"
+TE_LOCAL_LABEL = "miles"
+PHASES = ("all", "sources", "torch")
+
+# Records which fork commit the wheels in the wheel directory were built from.
+# It is uploaded next to them, so a pipeline can tell whether the ref has moved.
+SOURCE_MANIFEST = "transformer_engine-source.json"
+# Hands the torch sdist from the sources phase to the torch phase. A
+# subdirectory, so upload (top-level files only) never publishes it.
+SDIST_SUBDIR = "te-sdist"
 
 
-def _build_te_core_aarch64(wheel_dir, run):
-    repo_dir = tempfile.mkdtemp(prefix="transformer-engine-")
-    image_tag = (
-        f"miles-wheels-transformer-engine:"
-        f"{TE_VERSION}-aarch64-{uuid.uuid4().hex}"
-    )
-    image_built = False
-
-    try:
-        run(["git", "clone", "https://github.com/NVIDIA/TransformerEngine.git", repo_dir])
-        run(["git", "checkout", TE_COMMIT], cwd=repo_dir)
-        run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
-
-        # PyPI has no CUDA 13 aarch64 core wheel. Use NVIDIA's fixed
-        # manylinux_2_28_aarch64 common-only release recipe.
-        run([
-            "docker", "build", "--no-cache",
-            "--network", "host",
-            "--build-arg", "CUDA_MAJOR=13",
-            "--build-arg", "CUDA_MINOR=0",
-            "--build-arg", "BUILD_METAPACKAGE=false",
-            "--build-arg", "BUILD_COMMON=true",
-            "--build-arg", "BUILD_PYTORCH=false",
-            "--build-arg", "BUILD_JAX=false",
-            "--tag", image_tag,
-            "--file", os.path.join(repo_dir, "build_tools/wheel_utils/Dockerfile.aarch"),
-            repo_dir,
-        ])
-        image_built = True
-        run([
-            "docker", "run", "--rm",
-            "--network", "host",
-            "--env", f"TARGET_BRANCH={TE_COMMIT}",
-            "--mount", f"type=bind,source={wheel_dir},target=/wheelhouse",
-            image_tag,
-        ])
-    finally:
-        if image_built:
-            try:
-                result = subprocess.run(
-                    ["docker", "image", "rm", image_tag],
-                    check=False,
-                )
-            except OSError as exc:
-                print(f"WARNING: Failed to remove Docker image {image_tag}: {exc}")
-            else:
-                if result.returncode != 0:
-                    print(
-                        f"WARNING: Failed to remove Docker image {image_tag} "
-                        f"(exit code {result.returncode})"
-                    )
-        try:
-            shutil.rmtree(repo_dir)
-        except OSError as exc:
-            print(f"WARNING: Failed to remove Transformer Engine source {repo_dir}: {exc}")
+def _arch(args):
+    return "x86_64" if args.arch == "x86" else args.arch
 
 
-def _validate_te_build_environment(args):
-    expected_arch = "x86_64" if args.arch == "x86" else "aarch64"
+def _core_dist(args):
+    return f"transformer_engine_cu{int(args.cuda[:2])}"
+
+
+def _expected_wheels(args, version):
+    arch = _arch(args)
+    python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    return [
+        f"transformer_engine-{version}-py3-none-any.whl",
+        f"{_core_dist(args)}-{version}-py3-none-manylinux_2_28_{arch}.whl",
+        f"transformer_engine_torch-{version}-{python_tag}-{python_tag}-linux_{arch}.whl",
+    ]
+
+
+def _validate_arch(args):
+    expected_arch = _arch(args)
     machine = platform.machine()
     if machine != expected_arch:
         raise RuntimeError(
             f"Transformer Engine target arch is {expected_arch}, running on {machine}"
         )
 
+
+def _validate_torch_environment(args):
     if sys.version_info[:2] != (3, 12):
         raise RuntimeError(
             "Transformer Engine release wheels require Python 3.12, "
@@ -112,7 +96,117 @@ def _validate_te_build_environment(args):
         )
 
 
-def _validate_te_torch_wheel(path, core_dist):
+def _stamp_version(repo_dir):
+    path = os.path.join(repo_dir, "build_tools", "VERSION.txt")
+    with open(path) as f:
+        base = f.readline().strip()
+    if "+" in base:
+        raise RuntimeError(f"{path} already carries a local version: {base}")
+    version = f"{base}+{TE_LOCAL_LABEL}"
+    with open(path, "w") as f:
+        f.write(version + "\n")
+    return version
+
+
+def _remove_docker_image(image_tag):
+    try:
+        result = subprocess.run(["docker", "image", "rm", image_tag], check=False)
+    except OSError as exc:
+        print(f"WARNING: Failed to remove Docker image {image_tag}: {exc}")
+    else:
+        if result.returncode != 0:
+            print(
+                f"WARNING: Failed to remove Docker image {image_tag} "
+                f"(exit code {result.returncode})"
+            )
+
+
+def _build_sources(args, wheel_dir, run):
+    _validate_arch(args)
+    arch = _arch(args)
+    sdist_dir = os.path.join(wheel_dir, SDIST_SUBDIR)
+
+    for pattern in (
+        "transformer_engine-*.whl",
+        "transformer_engine_cu1[23]-*.whl",
+        "transformer_engine_torch-*.whl",
+        SOURCE_MANIFEST,
+    ):
+        for path in glob.glob(os.path.join(wheel_dir, pattern)):
+            os.remove(path)
+    shutil.rmtree(sdist_dir, ignore_errors=True)
+    os.makedirs(sdist_dir)
+
+    repo_dir = tempfile.mkdtemp(prefix="transformer-engine-")
+    wheelhouse = tempfile.mkdtemp(prefix="te-wheelhouse-")
+    image_tag = f"miles-wheels-transformer-engine:{arch}-{uuid.uuid4().hex}"
+    image_built = False
+
+    try:
+        run(["git", "clone", TE_REPO, repo_dir])
+        run(["git", "checkout", args.te_ref], cwd=repo_dir)
+        run(["git", "submodule", "update", "--init", "--recursive"], cwd=repo_dir)
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_dir, text=True,
+        ).strip()
+        version = _stamp_version(repo_dir)
+
+        dockerfile = "Dockerfile.x86" if args.arch == "x86" else "Dockerfile.aarch"
+        run([
+            "docker", "build", "--no-cache",
+            "--network", "host",
+            "--build-arg", f"CUDA_MAJOR={args.cuda[:2]}",
+            "--build-arg", f"CUDA_MINOR={args.cuda[2:]}",
+            "--build-arg", "BUILD_METAPACKAGE=true",
+            "--build-arg", "BUILD_COMMON=true",
+            "--build-arg", "BUILD_PYTORCH=true",
+            "--build-arg", "BUILD_JAX=false",
+            "--tag", image_tag,
+            "--file", os.path.join(repo_dir, "build_tools/wheel_utils", dockerfile),
+            repo_dir,
+        ])
+        image_built = True
+        # The recipe checks out TARGET_BRANCH first. Pin it to the commit that is
+        # already checked out, so the stamped VERSION.txt survives.
+        run([
+            "docker", "run", "--rm",
+            "--network", "host",
+            "--env", f"TARGET_BRANCH={commit}",
+            "--mount", f"type=bind,source={wheelhouse},target=/wheelhouse",
+            image_tag,
+        ])
+
+        for name in _expected_wheels(args, version)[:2]:
+            src = os.path.join(wheelhouse, name)
+            if not os.path.isfile(src):
+                raise RuntimeError(
+                    f"Transformer Engine recipe did not produce {name}; "
+                    f"got {sorted(os.listdir(wheelhouse))}"
+                )
+            shutil.move(src, wheel_dir)
+        sdists = glob.glob(os.path.join(wheelhouse, "transformer_engine_torch-*.tar.gz"))
+        if len(sdists) != 1:
+            raise RuntimeError(f"Expected one transformer_engine_torch sdist, found {sdists}")
+        shutil.move(sdists[0], sdist_dir)
+
+        with open(os.path.join(wheel_dir, SOURCE_MANIFEST), "w") as f:
+            json.dump(
+                {"repo": TE_REPO, "ref": args.te_ref, "commit": commit, "version": version},
+                f, indent=2,
+            )
+            f.write("\n")
+        print(f"Transformer Engine {version} sources built from {TE_REPO}@{commit}")
+    finally:
+        if image_built:
+            _remove_docker_image(image_tag)
+        for path in (repo_dir, wheelhouse):
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                print(f"WARNING: Failed to remove {path}: {exc}")
+
+
+def _validate_te_torch_wheel(path, core_dist, version):
     with zipfile.ZipFile(path) as wheel:
         metadata_paths = [
             name for name in wheel.namelist()
@@ -129,7 +223,7 @@ def _validate_te_torch_wheel(path, core_dist):
         raise RuntimeError(
             f"Unexpected Transformer Engine torch wheel name: {metadata['Name']}"
         )
-    if metadata["Version"] != TE_VERSION:
+    if metadata["Version"] != version:
         raise RuntimeError(
             f"Unexpected Transformer Engine torch wheel version: {metadata['Version']}"
         )
@@ -146,59 +240,36 @@ def _validate_te_torch_wheel(path, core_dist):
     if (
         len(core_requirements) != 1
         or canonicalize_name(core_requirements[0].name) != expected_core
-        or str(core_requirements[0].specifier) != f"=={TE_VERSION}"
+        or str(core_requirements[0].specifier) != f"=={version}"
     ):
         raise RuntimeError(
-            f"Expected {core_dist}=={TE_VERSION} in {path}, found {core_requirements}"
+            f"Expected {core_dist}=={version} in {path}, found {core_requirements}"
         )
 
 
-def build(args, wheel_dir, run):
-    _validate_te_build_environment(args)
-    cuda_major = int(args.cuda[:2])
-    core_dist = f"transformer_engine_cu{cuda_major}"
+def _build_torch(args, wheel_dir, run):
+    manifest_path = os.path.join(wheel_dir, SOURCE_MANIFEST)
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(f"{manifest_path} is missing; run the sources phase first")
+    with open(manifest_path) as f:
+        version = json.load(f)["version"]
 
-    for pattern in (
-        "transformer_engine-*.whl",
-        "transformer_engine_cu1[23]-*.whl",
-        "transformer_engine_torch-*.whl",
-    ):
-        for path in glob.glob(os.path.join(wheel_dir, pattern)):
-            os.remove(path)
+    sdists = glob.glob(os.path.join(wheel_dir, SDIST_SUBDIR, "transformer_engine_torch-*.tar.gz"))
+    if len(sdists) != 1:
+        raise RuntimeError(f"Expected one transformer_engine_torch sdist, found {sdists}")
+    for path in glob.glob(os.path.join(wheel_dir, "transformer_engine_torch-*.whl")):
+        os.remove(path)
 
+    expected = _expected_wheels(args, version)
     run([sys.executable, "-m", "pip", "install", "nvidia-mathdx==25.6.0"])
     run([
-        sys.executable, "-m", "pip", "download",
-        "--only-binary=:all:", "--no-deps",
-        f"transformer_engine=={TE_VERSION}",
-        "--dest", wheel_dir,
-    ])
-
-    if cuda_major < 13 or args.arch == "x86":
-        run([
-            sys.executable, "-m", "pip", "download",
-            "--only-binary=:all:", "--no-deps",
-            f"{core_dist}=={TE_VERSION}",
-            "--dest", wheel_dir,
-        ])
-    else:
-        _build_te_core_aarch64(wheel_dir, run)
-
-    core_wheels = glob.glob(
-        os.path.join(wheel_dir, f"{core_dist}-{TE_VERSION}-*.whl")
-    )
-    if len(core_wheels) != 1:
-        raise RuntimeError(
-            f"Expected one {core_dist} {TE_VERSION} wheel, found {core_wheels}"
-        )
-    run([
         sys.executable, "-m", "pip", "install",
-        "--force-reinstall", "--no-deps", core_wheels[0],
+        "--force-reinstall", "--no-deps", os.path.join(wheel_dir, expected[1]),
     ])
     run(
         [sys.executable, "-m", "pip", "wheel",
          "--no-cache-dir",
-         f"transformer_engine_torch=={TE_VERSION}",
+         sdists[0],
          "-v", "--no-build-isolation", "--no-deps",
          "-w", wheel_dir],
         env={
@@ -207,17 +278,21 @@ def build(args, wheel_dir, run):
         },
     )
 
-    arch = "x86_64" if args.arch == "x86" else args.arch
-    python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    expected = [
-        f"transformer_engine-{TE_VERSION}-py3-none-any.whl",
-        f"{core_dist}-{TE_VERSION}-py3-none-manylinux_2_28_{arch}.whl",
-        f"transformer_engine_torch-{TE_VERSION}-{python_tag}-{python_tag}-linux_{arch}.whl",
-    ]
     missing = [
         name for name in expected
         if not os.path.isfile(os.path.join(wheel_dir, name))
     ]
     if missing:
         raise RuntimeError(f"Missing Transformer Engine wheel(s): {missing}")
-    _validate_te_torch_wheel(os.path.join(wheel_dir, expected[2]), core_dist)
+    _validate_te_torch_wheel(os.path.join(wheel_dir, expected[2]), _core_dist(args), version)
+
+
+def build(args, wheel_dir, run):
+    _validate_arch(args)
+    if args.te_phase in ("all", "torch"):
+        # Fail before the hours-long sources phase, not after it.
+        _validate_torch_environment(args)
+    if args.te_phase in ("all", "sources"):
+        _build_sources(args, wheel_dir, run)
+    if args.te_phase in ("all", "torch"):
+        _build_torch(args, wheel_dir, run)

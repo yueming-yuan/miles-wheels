@@ -335,6 +335,9 @@ def cmd_upload(args):
     if not local:
         print(f"No .whl or .tar.gz files found in {WHEEL_DIR}")
         sys.exit(1)
+    # Source manifests record what the wheels were built from; the Dockerfile
+    # downloads only .whl / .tar.gz, so they never reach an image.
+    local += sorted(glob.glob(os.path.join(WHEEL_DIR, "*-source.json")))
 
     exists = subprocess.run(
         ["gh", "release", "view", tag, "--repo", REPO],
@@ -359,7 +362,7 @@ def cmd_upload(args):
     print(f"\nSyncing {len(local)} local assets into release '{tag}'")
     for path in local:
         name = os.path.basename(path)
-        if name.endswith(".whl"):
+        if name.endswith(".whl") and not args.keep_superseded:
             # A version bump changes the wheel filename; drop the superseded
             # asset so the Dockerfile's <dist>-*.whl glob stays unambiguous.
             dist = name.split("-")[0]
@@ -391,6 +394,11 @@ def main():
                          help="Don't auto-install Rust toolchain")
     p_build.add_argument("--router-ref", default=build_sglang_gateway.ROUTER_REF_DEFAULT,
                          help="sgl-router source branch or commit; does not change the rolling release tag")
+    p_build.add_argument("--te-ref", default=build_transformer_engine.TE_REF_DEFAULT,
+                         help="radixark/TransformerEngine branch or commit for the te step")
+    p_build.add_argument("--te-phase", default="all", choices=build_transformer_engine.PHASES,
+                         help="te step phase: sources needs only Docker, torch needs the target "
+                              "image's torch and nvcc, all runs both in one environment")
     p_build.set_defaults(func=cmd_build, bootstrap_rust=True)
 
     # ── upload ───────────────────────────────────────────────
@@ -401,6 +409,9 @@ def main():
     p_upload.add_argument("--cuda", default="129", help="CUDA version, e.g. 129, 130")
     p_upload.add_argument("--arch", default="x86", choices=["x86", "aarch64"], help="Architecture")
     p_upload.add_argument("--torch", help="Torch the wheels were built against, e.g. 213; targets the cu<cuda>-torch<torch>-<arch> release the miles Dockerfile pulls")
+    p_upload.add_argument("--keep-superseded", action="store_true",
+                          help="Keep a wheel's other-version assets, so a Dockerfile still pinned "
+                               "to the old version keeps building while consumers switch over")
     p_upload.set_defaults(func=cmd_upload)
 
     args = parser.parse_args()
