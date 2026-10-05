@@ -6,6 +6,40 @@ on:
 permissions:
   contents: read
 jobs:
+  test:
+    # Router integration tests at the built ref and at its base, so failures the ref
+    # introduces are told apart from ones its base already has.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: '4'
+      HEAD_REF: 36c4d142792b430b954385e909a16ffa0a6abdcd
+      BASE_REF: 374ff283397254d1a3c9577058d7089bcb91a7b1
+    steps:
+      - name: cargo test spec_test and routing_tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p logs
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
+          git clone -q https://github.com/radixark/sgl-router-for-miles.git router
+          cargo --version
+          for ref in "$HEAD_REF" "$BASE_REF"; do
+            git -C router checkout -q --detach "$ref"
+            (cd router && cargo test --test spec_test --test routing_tests --no-fail-fast) > "logs/cargo-test-${ref:0:10}.log" 2>&1
+            echo "$ref exit=$?" | tee -a logs/summary.txt
+            grep -E '^test result:|^test .* FAILED$' "logs/cargo-test-${ref:0:10}.log" | tee -a logs/summary.txt
+            grep -E '^test .* FAILED$' "logs/cargo-test-${ref:0:10}.log" | sort > "logs/failed-${ref:0:10}.txt" || true
+          done
+          comm -23 "logs/failed-${HEAD_REF:0:10}.txt" "logs/failed-${BASE_REF:0:10}.txt" > logs/new-failures.txt
+          echo "new failures at head:" && cat logs/new-failures.txt
+          grep -q 'test result' "logs/cargo-test-${HEAD_REF:0:10}.log" && [ ! -s logs/new-failures.txt ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: router-tests
+          path: logs/
   build:
     strategy:
       fail-fast: false
@@ -36,7 +70,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
             python -m pip install maturin==1.14.0 aiohttp packaging
-            python build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref 0e7c1ac7842317f39a9276af36f5f3a68ed85be8
+            python build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref 36c4d142792b430b954385e909a16ffa0a6abdcd
             python -m pip install /tmp/router-wheels/sglang_router-*.whl
             mkdir -p /tmp/router-bin
             tar xzf /tmp/router-wheels/sgl-model-gateway-*.tar.gz -C /tmp/router-bin
