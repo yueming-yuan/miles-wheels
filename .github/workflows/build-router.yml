@@ -19,22 +19,23 @@ jobs:
       - name: cargo test spec_test and routing_tests
         shell: bash
         run: |
-          set -uo pipefail
+          # GitHub's bash runs with -e; test failures must not stop the base run.
+          set +e -uo pipefail
           mkdir -p logs
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
-          git clone -q https://github.com/radixark/sgl-router-for-miles.git router
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev redis-server
+          git clone -q https://github.com/radixark/sgl-router-for-miles.git router || exit 1
           cargo --version
           for ref in "$HEAD_REF" "$BASE_REF"; do
             git -C router checkout -q --detach "$ref"
             (cd router && cargo test --test spec_test --test routing_tests --no-fail-fast) > "logs/cargo-test-${ref:0:10}.log" 2>&1
             echo "$ref exit=$?" | tee -a logs/summary.txt
             grep -E '^test result:|^test .* FAILED$' "logs/cargo-test-${ref:0:10}.log" | tee -a logs/summary.txt
-            grep -E '^test .* FAILED$' "logs/cargo-test-${ref:0:10}.log" | sort > "logs/failed-${ref:0:10}.txt" || true
+            grep -E '^test .* FAILED$' "logs/cargo-test-${ref:0:10}.log" | sort > "logs/failed-${ref:0:10}.txt"
           done
           comm -23 "logs/failed-${HEAD_REF:0:10}.txt" "logs/failed-${BASE_REF:0:10}.txt" > logs/new-failures.txt
-          echo "new failures at head:" && cat logs/new-failures.txt
-          grep -q 'test result' "logs/cargo-test-${HEAD_REF:0:10}.log" && [ ! -s logs/new-failures.txt ]
+          echo "new failures at head:"; cat logs/new-failures.txt
+          grep -q '^test result' "logs/cargo-test-${HEAD_REF:0:10}.log" && grep -q '^test result' "logs/cargo-test-${BASE_REF:0:10}.log" && [ ! -s logs/new-failures.txt ]
       - uses: actions/upload-artifact@v4
         if: always()
         with:
