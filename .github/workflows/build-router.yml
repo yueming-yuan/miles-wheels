@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 180
     env:
       CARGO_BUILD_JOBS: '4'
-      HEAD_REF: 52c3a9c3884cda48cbaae8ab1e6cd6cebac672d7
+      HEAD_REF: 74cbc9181ef49becba8ae7793d467f1bd8648f66
       BASE_REF: 523e94027d50ccfc394c961561d270ab1edd1c29
     steps:
       - name: cargo test spec_test and routing_tests
@@ -27,7 +27,10 @@ jobs:
           git clone -q https://github.com/radixark/sgl-router-for-miles.git router || exit 1
           cargo --version
           for ref in "$HEAD_REF" "$BASE_REF"; do
-            git -C router checkout -q --detach "$ref"
+            git -C router checkout -q -f --detach "$ref"
+            # crates.io yanked zip 0.6, which only the unused npyz dev-dependency pulls in; drop it at
+            # any ref that still has it, so the base resolves too.
+            sed -i '/^npyz = /d' router/Cargo.toml
             (cd router && cargo test --test spec_test --test routing_tests --no-fail-fast) > "logs/cargo-test-${ref:0:10}.log" 2>&1
             echo "$ref exit=$?" | tee -a logs/summary.txt
             grep -E '^test result:|^test .* FAILED$' "logs/cargo-test-${ref:0:10}.log" | tee -a logs/summary.txt
@@ -77,7 +80,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config libssl-dev cmake clang libclang-dev
             python -m pip install maturin==1.14.0 aiohttp packaging
-            python rx/build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref 52c3a9c3884cda48cbaae8ab1e6cd6cebac672d7
+            python rx/build_wheels.py build --cuda 130 --arch ${{ matrix.arch }} --only sgl-router --router-ref 74cbc9181ef49becba8ae7793d467f1bd8648f66
             python -m pip install /tmp/router-wheels/sglang_router-*.whl
             mkdir -p /tmp/router-bin
             tar xzf /tmp/router-wheels/sgl-model-gateway-*.tar.gz -C /tmp/router-bin
